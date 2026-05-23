@@ -1,10 +1,9 @@
 -- ══════════════════════════════════════════════════════════════
 --   Auto Fuel Farm | Survive the Apocalypse
---   Flow: วาปไปโซน Fuel → แม่เหล็กดูด Fuel มาหาตัว → กด F เก็บ → วาปไป Generator
+--   Flow: วาปหา Fuel → กด 1 → กด F เก็บ → วาปไป Generator → กด 1 → กด F ใส่
 -- ══════════════════════════════════════════════════════════════
 
 local Players      = game:GetService("Players")
-local RunService   = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local VIM          = game:GetService("VirtualInputManager")
 
@@ -12,27 +11,28 @@ local LocalPlayer  = Players.LocalPlayer
 
 -- ─── Config ───────────────────────────────────────────────────
 local Config = {
-    Enabled        = false,
-    FuelName       = "Fuel",
-    GeneratorName  = "Generator",
-    MagnetRadius   = 60,    -- รัศมีแม่เหล็กดูด fuel (studs)
-    MagnetTime     = 4,     -- ดูดนานกี่วินาที
-    MagnetSpeed    = 0.05,  -- อัปเดตทุกกี่วิ (ยิ่งต่ำยิ่งเร็ว)
-    TeleportDelay  = 0.4,
-    ActionDelay    = 0.5,
+    Enabled       = false,
+    FuelName      = "Fuel",
+    GeneratorName = "Generator",
+    TeleportDelay = 0.3,   -- หน่วงหลัง teleport
+    KeyDelay      = 0.3,   -- หน่วงระหว่างกดปุ่ม
+    MaxFuelPerRun = 5,     -- เก็บ fuel สูงสุดกี่อันต่อรอบ
+    WaitAtGen     = 3,     -- รอที่ Generator กี่วิก่อนวนรอบใหม่
 }
 
 -- ─── States ───────────────────────────────────────────────────
 local S = {
-    IDLE      = { text = "รอเริ่มต้น",                   color = Color3.fromRGB(120,120,135) },
-    GO_FUEL   = { text = "วาปไปโซน Fuel",                color = Color3.fromRGB(80,180,255)  },
-    MAGNET    = { text = "แม่เหล็กดูด Fuel...",          color = Color3.fromRGB(255,180,40)  },
-    COLLECT   = { text = "กด F เก็บ Fuel",               color = Color3.fromRGB(80,220,120)  },
-    GO_GEN    = { text = "วาปไปเครื่องปั่นไฟ",           color = Color3.fromRGB(180,100,255) },
-    WAIT_GEN  = { text = "ถึงเครื่องปั่นไฟแล้ว รอรอบถัดไป", color = Color3.fromRGB(80,220,120) },
-    NO_FUEL   = { text = "ไม่พบ Fuel ในแมป รอ...",       color = Color3.fromRGB(220,80,80)   },
-    NO_GEN    = { text = "ไม่พบเครื่องปั่นไฟ",           color = Color3.fromRGB(220,80,80)   },
-    DEAD      = { text = "ตาย รอ respawn...",             color = Color3.fromRGB(180,50,50)   },
+    IDLE     = { text = "รอเริ่มต้น",               color = Color3.fromRGB(120,120,135) },
+    GO_FUEL  = { text = "วาปไปหา Fuel",              color = Color3.fromRGB(80,180,255)  },
+    PRESS1   = { text = "กดเลข 1 (กระเป๋า)",         color = Color3.fromRGB(230,160,40)  },
+    PRESSF   = { text = "กด F เก็บ Fuel",            color = Color3.fromRGB(80,220,120)  },
+    GO_GEN   = { text = "วาปไปเครื่องปั่นไฟ",        color = Color3.fromRGB(180,100,255) },
+    INSERT1  = { text = "กดเลข 1 ที่ Generator",     color = Color3.fromRGB(230,160,40)  },
+    INSERTF  = { text = "กด F ใส่ Fuel",             color = Color3.fromRGB(255,120,60)  },
+    DONE     = { text = "ใส่ Fuel เสร็จ รอรอบถัดไป", color = Color3.fromRGB(80,220,120)  },
+    NO_FUEL  = { text = "ไม่พบ Fuel ในแมป รอ...",    color = Color3.fromRGB(220,80,80)   },
+    NO_GEN   = { text = "ไม่พบเครื่องปั่นไฟ",        color = Color3.fromRGB(220,80,80)   },
+    DEAD     = { text = "ตาย รอ respawn...",          color = Color3.fromRGB(180,50,50)   },
 }
 
 local StatusText, StatusBox, InfoLabel, CountLabel
@@ -44,9 +44,8 @@ local function setState(s)
         StatusText.TextColor3 = s.color
     end
     if StatusBox then
-        local r,g,b = s.color.R*0.13, s.color.G*0.13, s.color.B*0.13
         TweenService:Create(StatusBox, TweenInfo.new(0.2), {
-            BackgroundColor3 = Color3.new(r,g,b)
+            BackgroundColor3 = Color3.new(s.color.R*0.13, s.color.G*0.13, s.color.B*0.13)
         }):Play()
     end
 end
@@ -79,20 +78,14 @@ local function pressKey(key)
     VIM:SendKeyEvent(false, key, false, game)
 end
 
-local function openBackpack()
-    for _, g in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-        if (g:IsA("TextButton") or g:IsA("ImageButton"))
-        and g.Name:lower():find("backpack",1,true) then
-            g:activate()
-            task.wait(0.2)
-            return
-        end
-    end
-    pressKey(Enum.KeyCode.Tab)
-    task.wait(0.2)
+local function press1ThenF()
+    pressKey(Enum.KeyCode.One)
+    task.wait(Config.KeyDelay)
+    pressKey(Enum.KeyCode.F)
+    task.wait(Config.KeyDelay)
 end
 
--- ─── หา Fuel ทั้งหมด ──────────────────────────────────────────
+-- ─── หา Fuel / Generator ──────────────────────────────────────
 local function findAllFuels()
     local list = {}
     local kw = Config.FuelName:lower()
@@ -105,7 +98,6 @@ local function findAllFuels()
     return list
 end
 
--- ─── หา Generator ─────────────────────────────────────────────
 local function findGenerator(myPos)
     local kw = Config.GeneratorName:lower()
     local best, bestD = nil, math.huge
@@ -122,65 +114,13 @@ local function findGenerator(myPos)
     return best
 end
 
--- ─── หา Fuel ที่ใกล้ที่สุด ────────────────────────────────────
-local function findNearestFuel(myPos)
-    local fuels = findAllFuels()
-    local best, bestD = nil, math.huge
-    for _, f in ipairs(fuels) do
-        local pos = getPos(f)
-        if pos then
-            local d = (myPos - pos).Magnitude
-            if d < bestD then best, bestD = f, d end
-        end
-    end
-    return best
-end
-
--- ─── แม่เหล็กดูด Fuel มาหาตัว ────────────────────────────────
--- ย้าย Model ของ Fuel ให้มาอยู่รอบๆ ตัวละคร
-local function runMagnet(hrp, duration)
-    local endTime = tick() + duration
-    local fuelCount = 0
-    local angle = 0
-
-    while tick() < endTime and Config.Enabled do
-        fuelCount = 0
-        local fuels = findAllFuels()
-
-        for _, fuel in ipairs(fuels) do
-            local fpos = getPos(fuel)
-            if fpos and (hrp.Position - fpos).Magnitude <= Config.MagnetRadius then
-                -- วางรอบๆ ตัวละครเป็นวงกลม ไม่ซ้อนกัน
-                angle = angle + 0.4
-                local offset = Vector3.new(
-                    math.cos(angle) * 2,
-                    0,
-                    math.sin(angle) * 2
-                )
-                local target = hrp.Position + offset
-
-                -- ย้าย Model ทั้งก้อน
-                if fuel.PrimaryPart then
-                    fuel:SetPrimaryPartCFrame(CFrame.new(target))
-                else
-                    for _, part in ipairs(fuel:GetDescendants()) do
-                        if part:IsA("BasePart") then
-                            part.CFrame = CFrame.new(target)
-                        end
-                    end
-                end
-
-                fuelCount += 1
-            end
-        end
-
-        if InfoLabel then
-            local remaining = math.max(0, math.ceil(endTime - tick()))
-            InfoLabel.Text = ("แม่เหล็ก: ดูด %d Fuel  |  เหลือ %ds"):format(fuelCount, remaining)
-        end
-
-        task.wait(Config.MagnetSpeed)
-    end
+local function sortByDist(list, from)
+    table.sort(list, function(a, b)
+        local pa = getPos(a) or Vector3.new()
+        local pb = getPos(b) or Vector3.new()
+        return (from - pa).Magnitude < (from - pb).Magnitude
+    end)
+    return list
 end
 
 -- ─── Main Loop ────────────────────────────────────────────────
@@ -207,47 +147,63 @@ local function startFarm()
                 continue
             end
 
-            -- ── 1. หา Fuel ที่ใกล้ที่สุด แล้ววาปไป ──────────
-            setState(S.GO_FUEL)
-            local nearFuel = findNearestFuel(hrp.Position)
-            if not nearFuel then
+            -- ── หา Fuel ทั้งหมด ──────────────────────────────
+            local fuels = findAllFuels()
+            if #fuels == 0 then
                 setState(S.NO_FUEL)
                 task.wait(3)
                 continue
             end
 
-            local fpos = getPos(nearFuel)
-            if fpos then
-                teleportTo(hrp, fpos)
+            fuels = sortByDist(fuels, hrp.Position)
+
+            -- ── วาปเก็บทีละอัน: กด 1 → กด F ──────────────────
+            local collected = 0
+            for _, fuel in ipairs(fuels) do
+                if not Config.Enabled then break end
+                if collected >= Config.MaxFuelPerRun then break end
+
+                local _, hrpN, humN = getCharParts()
+                if not hrpN or not humN or humN.Health <= 0 then break end
+
+                local fpos = getPos(fuel)
+                if not fpos then continue end
+
+                -- วาปไป Fuel
+                setState(S.GO_FUEL)
+                if InfoLabel then
+                    InfoLabel.Text = ("เก็บ %d/%d  |  %s"):format(
+                        collected, Config.MaxFuelPerRun, fuel.Name)
+                end
+                teleportTo(hrpN, fpos)
                 task.wait(Config.TeleportDelay)
-            end
 
-            -- ── 2. เปิด Backpack ──────────────────────────────
-            openBackpack()
+                -- กด 1
+                setState(S.PRESS1)
+                pressKey(Enum.KeyCode.One)
+                task.wait(Config.KeyDelay)
 
-            -- ── 3. แม่เหล็กดูด Fuel มาหาตัว ──────────────────
-            setState(S.MAGNET)
-            local _, hrp2 = getCharParts()
-            if not hrp2 then task.wait(1) continue end
-
-            runMagnet(hrp2, Config.MagnetTime) -- ดูดนาน X วิ
-
-            -- ── 4. กด F เก็บ Fuel ────────────────────────────
-            setState(S.COLLECT)
-            for i = 1, 5 do -- กด F หลายครั้งเพื่อให้แน่ใจ
+                -- กด F
+                setState(S.PRESSF)
                 pressKey(Enum.KeyCode.F)
-                task.wait(0.2)
-            end
-            task.wait(Config.ActionDelay)
+                task.wait(Config.KeyDelay)
 
-            -- ── 5. วาปไป Generator ────────────────────────────
-            local _, hrp3, hum3 = getCharParts()
-            if not hrp3 or not hum3 or hum3.Health <= 0 then
+                collected += 1
+            end
+
+            if collected == 0 then
+                task.wait(1)
+                continue
+            end
+
+            -- ── วาปไป Generator ───────────────────────────────
+            local _, hrp2, hum2 = getCharParts()
+            if not hrp2 or not hum2 or hum2.Health <= 0 then
                 task.wait(1) continue
             end
 
             setState(S.GO_GEN)
-            local gen = findGenerator(hrp3.Position)
+            local gen = findGenerator(hrp2.Position)
             if not gen then
                 setState(S.NO_GEN)
                 task.wait(3)
@@ -256,20 +212,29 @@ local function startFarm()
 
             local gpos = getPos(gen)
             if gpos then
-                teleportTo(hrp3, gpos)
+                teleportTo(hrp2, gpos)
                 task.wait(Config.TeleportDelay)
             end
 
-            -- ── 6. ถึง Generator แล้ว (ผู้เล่นกด F เอง) ───────
-            setState(S.WAIT_GEN)
-            if InfoLabel then InfoLabel.Text = "ถึง Generator แล้ว! กด F ใส่ Fuel ได้เลย" end
+            -- ── กด 1 ที่ Generator ────────────────────────────
+            setState(S.INSERT1)
+            pressKey(Enum.KeyCode.One)
+            task.wait(Config.KeyDelay)
 
+            -- ── กด F ใส่ Fuel ─────────────────────────────────
+            setState(S.INSERTF)
+            pressKey(Enum.KeyCode.F)
+            task.wait(Config.KeyDelay)
+
+            -- เสร็จรอบ
             cycleCount += 1
+            setState(S.DONE)
             if CountLabel then
-                CountLabel.Text = ("ทำไปแล้ว: %d รอบ"):format(cycleCount)
+                CountLabel.Text = ("ทำไปแล้ว: %d รอบ  |  เก็บ %d อัน"):format(cycleCount, collected)
             end
+            if InfoLabel then InfoLabel.Text = "" end
 
-            task.wait(4) -- รอให้ผู้เล่นใส่ fuel เอง ก่อนวนรอบถัดไป
+            task.wait(Config.WaitAtGen)
         end
     end)
 end
@@ -326,18 +291,18 @@ local TitleLbl = Instance.new("TextLabel")
 TitleLbl.Size = UDim2.new(1,-12,0,22)
 TitleLbl.Position = UDim2.new(0,12,0,3)
 TitleLbl.BackgroundTransparency = 1
-TitleLbl.Text = "Fuel Auto Farm  |  Magnet Mode"
+TitleLbl.Text = "Fuel Auto Farm"
 TitleLbl.TextColor3 = Color3.new(1,1,1)
 TitleLbl.Font = Enum.Font.GothamBold
-TitleLbl.TextSize = 14
+TitleLbl.TextSize = 15
 TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
 TitleLbl.Parent = Title
 
 local SubLbl = Instance.new("TextLabel")
 SubLbl.Size = UDim2.new(1,-12,0,13)
-SubLbl.Position = UDim2.new(0,12,0,25)
+SubLbl.Position = UDim2.new(0,12,0,26)
 SubLbl.BackgroundTransparency = 1
-SubLbl.Text = "Survive the Apocalypse"
+SubLbl.Text = "Survive the Apocalypse  |  [1] + [F] = เก็บ/ใส่"
 SubLbl.TextColor3 = Color3.fromRGB(170,195,255)
 SubLbl.Font = Enum.Font.Gotham
 SubLbl.TextSize = 10
@@ -355,8 +320,8 @@ corner(SBox, 10)
 StatusBox = SBox
 
 local STitle = Instance.new("TextLabel")
-STitle.Size = UDim2.new(1,-10,0,16)
-STitle.Position = UDim2.new(0,10,0,3)
+STitle.Size = UDim2.new(1,-10,0,15)
+STitle.Position = UDim2.new(0,10,0,4)
 STitle.BackgroundTransparency = 1
 STitle.Text = "สถานะปัจจุบัน"
 STitle.TextColor3 = Color3.fromRGB(80,80,100)
@@ -367,7 +332,7 @@ STitle.Parent = SBox
 
 local STxt = Instance.new("TextLabel")
 STxt.Size = UDim2.new(1,-20,0,30)
-STxt.Position = UDim2.new(0,10,0,18)
+STxt.Position = UDim2.new(0,10,0,20)
 STxt.BackgroundTransparency = 1
 STxt.Text = S.IDLE.text
 STxt.TextColor3 = S.IDLE.color
@@ -378,7 +343,7 @@ STxt.TextWrapped = true
 STxt.Parent = SBox
 StatusText = STxt
 
--- Info label (แม่เหล็ก progress)
+-- Info label
 local ILbl = Instance.new("TextLabel")
 ILbl.Size = UDim2.new(1,-20,0,16)
 ILbl.Position = UDim2.new(0,10,0,120)
@@ -418,7 +383,7 @@ local function makeInput(labelTxt, placeholder, default, yPos, onChange)
 
     local box = Instance.new("TextBox")
     box.Size = UDim2.new(1,-20,0,28)
-    box.Position = UDim2.new(0,10,0,yPos+16)
+    box.Position = UDim2.new(0,10,0,yPos+15)
     box.BackgroundColor3 = Color3.fromRGB(22,22,34)
     box.BorderSizePixel = 0
     box.Text = default
@@ -439,13 +404,13 @@ makeInput("ชื่อ Model Fuel", "Fuel", Config.FuelName, 162,
 makeInput("ชื่อ Model Generator", "Generator", Config.GeneratorName, 210,
     function(v) Config.GeneratorName = v end)
 
-makeInput("รัศมีแม่เหล็ก (studs)", "60", tostring(Config.MagnetRadius), 258,
-    function(v) local n=tonumber(v) if n and n>0 then Config.MagnetRadius=n end end)
+makeInput("เก็บ Fuel สูงสุดกี่อันต่อรอบ", "5", tostring(Config.MaxFuelPerRun), 258,
+    function(v) local n=tonumber(v) if n and n>=1 then Config.MaxFuelPerRun=math.floor(n) end end)
 
-makeInput("เวลาดูด Fuel (วินาที)", "4", tostring(Config.MagnetTime), 306,
-    function(v) local n=tonumber(v) if n and n>=1 then Config.MagnetTime=n end end)
+makeInput("Delay ระหว่างปุ่ม (วินาที)", "0.3", tostring(Config.KeyDelay), 306,
+    function(v) local n=tonumber(v) if n and n>=0.1 then Config.KeyDelay=n end end)
 
--- Toggle button
+-- Toggle Button
 local Btn = Instance.new("TextButton")
 Btn.Size = UDim2.new(1,-20,0,40)
 Btn.Position = UDim2.new(0,10,0,348)
