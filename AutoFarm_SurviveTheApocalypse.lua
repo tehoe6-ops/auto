@@ -1,44 +1,71 @@
 -- ══════════════════════════════════════════════════════════════
---   Auto Farm | Survive the Apocalypse
---   Features: Auto Teleport, Auto Collect, GUI Toggle, Item Filter
---   วิธีใช้: รันผ่าน Executor (Synapse X / KRNL / Fluxus / ฯลฯ)
+--   Auto Fuel Farm | Survive the Apocalypse
+--   Flow: หา Fuel → วาป → กด E เก็บ → วาปเครื่องปั่นไฟ → กด E ใส่
 -- ══════════════════════════════════════════════════════════════
 
-local Players      = game:GetService("Players")
-local RunService   = game:GetService("RunService")
+local Players  = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+local VIM      = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 
--- ─── Config (แก้ได้ตามต้องการ) ───────────────────────────────
+-- ─── Config ───────────────────────────────────────────────────
 local Config = {
-    Enabled       = false,
-    ItemFilter    = "Emerald", -- ชื่อ item ที่ต้องการ (เว้นว่าง = เก็บทุกอย่าง)
-    TeleportDelay = 0.15, -- หน่วงเวลาระหว่าง teleport แต่ละครั้ง (วินาที)
-    SearchRadius  = 3000, -- รัศมีสูงสุดในการค้นหา item
-    CollectOffset = 2,    -- ระยะ offset เหนือ item เวลา teleport ไป
+    Enabled        = false,
+    FuelName       = "Fuel",       -- ชื่อ item fuel (แก้ได้ใน GUI)
+    GeneratorName  = "Generator",  -- ชื่อเครื่องปั่นไฟ (แก้ได้ใน GUI)
+    TeleportDelay  = 0.35,         -- หน่วงหลัง teleport
+    PressEDelay    = 0.6,          -- หน่วงหลังกด E
+    SearchRadius   = 5000,
 }
 
--- ─── ชื่อ Folder / Parent ที่มักเก็บ item ในเกม survival ──────
--- ปรับตาม workspace ของเกม Survive the Apocalypse จริงๆ ได้เลย
-local ITEM_SEARCH_ROOTS = {
-    workspace,
+-- ─── States ───────────────────────────────────────────────────
+local S = {
+    IDLE         = { text = "รอเริ่มต้น",                  color = Color3.fromRGB(120,120,130) },
+    FIND_FUEL    = { text = "กำลังหา Fuel...",              color = Color3.fromRGB(230,180,40)  },
+    GO_FUEL      = { text = "วาปไปหา Fuel",                color = Color3.fromRGB(80,180,255)  },
+    COLLECT      = { text = "กด E เก็บ Fuel",              color = Color3.fromRGB(80,220,120)  },
+    FIND_GEN     = { text = "กำลังหาเครื่องปั่นไฟ...",     color = Color3.fromRGB(230,180,40)  },
+    GO_GEN       = { text = "วาปไปเครื่องปั่นไฟ",          color = Color3.fromRGB(80,180,255)  },
+    INSERT       = { text = "กด E ใส่ Fuel",               color = Color3.fromRGB(180,100,255) },
+    NO_FUEL      = { text = "ไม่พบ Fuel ในแมป",            color = Color3.fromRGB(220,80,80)   },
+    NO_GEN       = { text = "ไม่พบเครื่องปั่นไฟ",          color = Color3.fromRGB(220,80,80)   },
+    DEAD         = { text = "ตัวละครตาย รอ respawn...",     color = Color3.fromRGB(200,60,60)   },
 }
 
--- ─── Helper: ดึง Character ปัจจุบัน ─────────────────────────
-local function getCharParts()
-    local char = LocalPlayer.Character
-    if not char then return nil, nil, nil end
-    local hrp  = char:FindFirstChild("HumanoidRootPart")
-    local hum  = char:FindFirstChild("Humanoid")
-    return char, hrp, hum
+-- ─── UI refs (assign ทีหลัง) ──────────────────────────────────
+local StatusText  = nil
+local StatusBox   = nil
+local CountLabel  = nil
+local cycleCount  = 0
+
+local function setState(s)
+    if StatusText then
+        StatusText.Text      = s.text
+        StatusText.TextColor3 = s.color
+    end
+    if StatusBox then
+        TweenService:Create(StatusBox, TweenInfo.new(0.2), {
+            BackgroundColor3 = Color3.fromRGB(
+                math.clamp(s.color.R * 255 * 0.15, 0, 255) / 255,
+                math.clamp(s.color.G * 255 * 0.15, 0, 255) / 255,
+                math.clamp(s.color.B * 255 * 0.15, 0, 255) / 255
+            )
+        }):Play()
+    end
 end
 
--- ─── Helper: หาตำแหน่งของ object ────────────────────────────
-local function getPosition(obj)
-    if obj:IsA("BasePart") then
-        return obj.Position
-    elseif obj:IsA("Model") then
+-- ─── Helpers ──────────────────────────────────────────────────
+local function getCharParts()
+    local c = LocalPlayer.Character
+    if not c then return nil, nil, nil end
+    return c, c:FindFirstChild("HumanoidRootPart"), c:FindFirstChild("Humanoid")
+end
+
+local function getPos(obj)
+    if obj:IsA("BasePart") then return obj.Position end
+    if obj:IsA("Model") then
         if obj.PrimaryPart then return obj.PrimaryPart.Position end
         for _, d in ipairs(obj:GetDescendants()) do
             if d:IsA("BasePart") then return d.Position end
@@ -47,282 +74,324 @@ local function getPosition(obj)
     return nil
 end
 
--- ─── Helper: ตรวจว่า object เป็น item ที่ต้องการ ─────────────
-local function isTargetItem(obj)
-    -- ข้าม BasePart ที่เป็นส่วนของตัวละคร
-    if Players:GetPlayerFromCharacter(obj)
-    or Players:GetPlayerFromCharacter(obj.Parent) then
-        return false
-    end
-
-    -- รับเฉพาะ Model หรือ BasePart ที่ไม่ใช่ map (CanCollide + ไม่ใหญ่เกินไป)
-    if obj:IsA("BasePart") then
-        if obj.Size.Magnitude > 40 then return false end  -- ข้ามส่วน map ขนาดใหญ่
-    elseif not obj:IsA("Model") then
-        return false
-    end
-
-    -- กรองชื่อ
-    if Config.ItemFilter ~= "" then
-        return obj.Name:lower():find(Config.ItemFilter:lower(), 1, true) ~= nil
-    end
-
-    return true
+local function teleportTo(hrp, pos)
+    hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
 end
 
--- ─── หา item ที่ใกล้ที่สุด ────────────────────────────────────
-local function findNearestItem(myPos)
-    local nearest, nearestDist = nil, Config.SearchRadius
+local function pressE()
+    VIM:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
+    task.wait(0.1)
+    VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+end
 
-    for _, root in ipairs(ITEM_SEARCH_ROOTS) do
-        for _, obj in ipairs(root:GetDescendants()) do
-            if isTargetItem(obj) then
-                local pos = getPosition(obj)
-                if pos then
-                    local dist = (myPos - pos).Magnitude
-                    if dist < nearestDist then
-                        nearest, nearestDist = obj, dist
-                    end
-                end
+local function findNearest(keyword, myPos)
+    local best, bestDist = nil, Config.SearchRadius
+    local kw = keyword:lower()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj.Name:lower():find(kw, 1, true)
+        and not Players:GetPlayerFromCharacter(obj)
+        and not Players:GetPlayerFromCharacter(obj.Parent) then
+            local pos = getPos(obj)
+            if pos then
+                local d = (myPos - pos).Magnitude
+                if d < bestDist then best, bestDist = obj, d end
             end
         end
     end
-
-    return nearest, nearestDist
-end
-
--- ─── Teleport ─────────────────────────────────────────────────
-local function teleportTo(hrp, pos)
-    hrp.CFrame = CFrame.new(pos + Vector3.new(0, Config.CollectOffset, 0))
-end
-
--- ─── Touch item (กระตุ้น Touched event) ──────────────────────
-local function touchItem(hrp, obj)
-    local pos = getPosition(obj)
-    if pos then
-        hrp.CFrame = CFrame.new(pos + Vector3.new(0, 1, 0))
-    end
+    return best, bestDist
 end
 
 -- ─── Main Farm Loop ───────────────────────────────────────────
-local farmConn = nil
+local farmThread = nil
 
-local function startLoop()
-    if farmConn then farmConn:Disconnect() end
+local function stopFarm()
+    if farmThread then
+        task.cancel(farmThread)
+        farmThread = nil
+    end
+    Config.Enabled = false
+    setState(S.IDLE)
+end
 
-    farmConn = RunService.Heartbeat:Connect(function()
-        if not Config.Enabled then return end
+local function startFarm()
+    stopFarm()
+    Config.Enabled = true
+    cycleCount = 0
 
-        local _, hrp, hum = getCharParts()
-        if not hrp or not hum or hum.Health <= 0 then return end
+    farmThread = task.spawn(function()
+        while Config.Enabled do
+            local _, hrp, hum = getCharParts()
 
-        local item = findNearestItem(hrp.Position)
-        if item then
-            local pos = getPosition(item)
-            if pos then
-                teleportTo(hrp, pos)
-                task.wait(0.05)
-                touchItem(hrp, item)
+            -- รอ respawn
+            if not hrp or not hum or hum.Health <= 0 then
+                setState(S.DEAD)
+                task.wait(2)
+                continue
+            end
+
+            -- ── 1. หา Fuel ──────────────────────────────────
+            setState(S.FIND_FUEL)
+            local fuel = findNearest(Config.FuelName, hrp.Position)
+            if not fuel then
+                setState(S.NO_FUEL)
+                task.wait(2)
+                continue
+            end
+
+            -- ── 2. วาปไป Fuel ───────────────────────────────
+            setState(S.GO_FUEL)
+            local fpos = getPos(fuel)
+            if fpos then
+                teleportTo(hrp, fpos)
                 task.wait(Config.TeleportDelay)
             end
-        else
-            task.wait(0.5) -- ไม่เจอ item พักรอสักครู่
+
+            -- ── 3. กด E เก็บ Fuel ───────────────────────────
+            setState(S.COLLECT)
+            pressE()
+            task.wait(Config.PressEDelay)
+
+            -- ── 4. หาเครื่องปั่นไฟ ──────────────────────────
+            local _, hrp2, hum2 = getCharParts()
+            if not hrp2 or not hum2 or hum2.Health <= 0 then continue end
+
+            setState(S.FIND_GEN)
+            local gen = findNearest(Config.GeneratorName, hrp2.Position)
+            if not gen then
+                setState(S.NO_GEN)
+                task.wait(2)
+                continue
+            end
+
+            -- ── 5. วาปไปเครื่องปั่นไฟ ───────────────────────
+            setState(S.GO_GEN)
+            local gpos = getPos(gen)
+            if gpos then
+                teleportTo(hrp2, gpos)
+                task.wait(Config.TeleportDelay)
+            end
+
+            -- ── 6. กด E ใส่ Fuel ────────────────────────────
+            setState(S.INSERT)
+            pressE()
+            task.wait(Config.PressEDelay)
+
+            -- นับรอบ
+            cycleCount += 1
+            if CountLabel then
+                CountLabel.Text = ("ทำไปแล้ว: %d รอบ"):format(cycleCount)
+            end
+
+            task.wait(0.1)
         end
     end)
 end
 
-startLoop()
+-- ─── GUI Builder ──────────────────────────────────────────────
+local function corner(p, r) local c=Instance.new("UICorner") c.CornerRadius=UDim.new(0,r or 8) c.Parent=p end
+local function pad(p,t,b,l,r) local u=Instance.new("UIPadding") u.PaddingTop=UDim.new(0,t) u.PaddingBottom=UDim.new(0,b) u.PaddingLeft=UDim.new(0,l) u.PaddingRight=UDim.new(0,r) u.Parent=p end
 
--- ─── GUI ──────────────────────────────────────────────────────
-local function makeCorner(parent, radius)
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, radius or 8)
-    c.Parent = parent
-    return c
-end
+local gui = Instance.new("ScreenGui")
+gui.Name           = "FuelFarmGUI"
+gui.ResetOnSpawn   = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent         = LocalPlayer:WaitForChild("PlayerGui")
 
-local function makeLabel(parent, text, pos, size, fontSize, color, xAlign)
-    local l = Instance.new("TextLabel")
-    l.Size             = size  or UDim2.new(1, -20, 0, 18)
-    l.Position         = pos   or UDim2.new(0, 10, 0, 0)
-    l.BackgroundTransparency = 1
-    l.Text             = text
-    l.TextColor3       = color or Color3.fromRGB(210, 210, 220)
-    l.TextSize         = fontSize or 12
-    l.Font             = Enum.Font.Gotham
-    l.TextXAlignment   = xAlign or Enum.TextXAlignment.Left
-    l.TextWrapped      = true
-    l.Parent           = parent
-    return l
-end
-
--- ScreenGui
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name          = "AutoFarmGUI"
-ScreenGui.ResetOnSpawn  = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent        = LocalPlayer:WaitForChild("PlayerGui")
-
--- Main Frame (Draggable)
+-- ── Main Frame ──
 local Frame = Instance.new("Frame")
-Frame.Size              = UDim2.new(0, 290, 0, 260)
-Frame.Position          = UDim2.new(0, 16, 0.5, -130)
-Frame.BackgroundColor3  = Color3.fromRGB(15, 15, 22)
-Frame.BorderSizePixel   = 0
-Frame.Active            = true
-Frame.Draggable         = true
-Frame.Parent            = ScreenGui
-makeCorner(Frame, 12)
+Frame.Size             = UDim2.new(0, 300, 0, 370)
+Frame.Position         = UDim2.new(0, 16, 0.5, -185)
+Frame.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+Frame.BorderSizePixel  = 0
+Frame.Active           = true
+Frame.Draggable        = true
+Frame.Parent           = gui
+corner(Frame, 14)
 
--- Drop shadow (fake)
-local Shadow = Instance.new("Frame")
-Shadow.Size             = UDim2.new(1, 14, 1, 14)
-Shadow.Position         = UDim2.new(0, -7, 0, 4)
-Shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-Shadow.BackgroundTransparency = 0.65
-Shadow.BorderSizePixel  = 0
-Shadow.ZIndex           = Frame.ZIndex - 1
-Shadow.Parent           = Frame
-makeCorner(Shadow, 16)
+-- shadow
+local Shad = Instance.new("Frame")
+Shad.Size              = UDim2.new(1,16,1,16)
+Shad.Position          = UDim2.new(0,-8,0,6)
+Shad.BackgroundColor3  = Color3.new(0,0,0)
+Shad.BackgroundTransparency = 0.6
+Shad.BorderSizePixel   = 0
+Shad.ZIndex            = Frame.ZIndex - 1
+Shad.Parent            = Frame
+corner(Shad, 18)
 
--- Title Bar
-local TitleBar = Instance.new("Frame")
-TitleBar.Size           = UDim2.new(1, 0, 0, 38)
-TitleBar.BackgroundColor3 = Color3.fromRGB(30, 80, 200)
-TitleBar.BorderSizePixel = 0
-TitleBar.Parent         = Frame
-makeCorner(TitleBar, 12)
+-- ── Title ──
+local Title = Instance.new("Frame")
+Title.Size             = UDim2.new(1,0,0,40)
+Title.BackgroundColor3 = Color3.fromRGB(25,90,210)
+Title.BorderSizePixel  = 0
+Title.Parent           = Frame
+corner(Title, 14)
+-- กันมุมล่างของ title โผล่
+local TitleFix = Instance.new("Frame")
+TitleFix.Size             = UDim2.new(1,0,0.5,0)
+TitleFix.Position         = UDim2.new(0,0,0.5,0)
+TitleFix.BackgroundColor3 = Color3.fromRGB(25,90,210)
+TitleFix.BorderSizePixel  = 0
+TitleFix.Parent           = Title
 
--- patch corners ด้านล่างของ TitleBar ให้เป็นสี่เหลี่ยม
-local TitlePatch = Instance.new("Frame")
-TitlePatch.Size         = UDim2.new(1, 0, 0.5, 0)
-TitlePatch.Position     = UDim2.new(0, 0, 0.5, 0)
-TitlePatch.BackgroundColor3 = Color3.fromRGB(30, 80, 200)
-TitlePatch.BorderSizePixel = 0
-TitlePatch.Parent       = TitleBar
+local TitleLbl = Instance.new("TextLabel")
+TitleLbl.Size              = UDim2.new(1,-12,1,0)
+TitleLbl.Position          = UDim2.new(0,12,0,0)
+TitleLbl.BackgroundTransparency = 1
+TitleLbl.Text              = "Fuel Auto Farm"
+TitleLbl.TextColor3        = Color3.new(1,1,1)
+TitleLbl.Font              = Enum.Font.GothamBold
+TitleLbl.TextSize          = 15
+TitleLbl.TextXAlignment    = Enum.TextXAlignment.Left
+TitleLbl.Parent            = Title
 
-Instance.new("TextLabel", TitleBar).BackgroundTransparency = 1
-local TitleLbl = makeLabel(TitleBar, "Auto Farm  |  Survive the Apocalypse",
-    UDim2.new(0, 10, 0, 0), UDim2.new(1, -10, 1, 0), 13,
-    Color3.fromRGB(255, 255, 255), Enum.TextXAlignment.Left)
-TitleLbl.Font = Enum.Font.GothamBold
+local SubLbl = Instance.new("TextLabel")
+SubLbl.Size                = UDim2.new(1,-12,0,14)
+SubLbl.Position            = UDim2.new(0,12,0,24)
+SubLbl.BackgroundTransparency = 1
+SubLbl.Text                = "Survive the Apocalypse"
+SubLbl.TextColor3          = Color3.fromRGB(180,200,255)
+SubLbl.Font                = Enum.Font.Gotham
+SubLbl.TextSize            = 11
+SubLbl.TextXAlignment      = Enum.TextXAlignment.Left
+SubLbl.Parent              = Title
 
--- ── Filter Input ──
-makeLabel(Frame, "Filter ชื่อ Item  (เว้นว่าง = เก็บทั้งหมด)",
-    UDim2.new(0, 10, 0, 46), UDim2.new(1, -20, 0, 16), 11)
+-- ── Status Box ──
+local SBox = Instance.new("Frame")
+SBox.Name              = "StatusBox"
+SBox.Size              = UDim2.new(1,-20,0,56)
+SBox.Position          = UDim2.new(0,10,0,50)
+SBox.BackgroundColor3  = Color3.fromRGB(20,20,30)
+SBox.BorderSizePixel   = 0
+SBox.Parent            = Frame
+corner(SBox, 10)
+StatusBox = SBox
 
-local FilterBox = Instance.new("TextBox")
-FilterBox.Size              = UDim2.new(1, -20, 0, 30)
-FilterBox.Position          = UDim2.new(0, 10, 0, 64)
-FilterBox.BackgroundColor3  = Color3.fromRGB(28, 28, 40)
-FilterBox.BorderSizePixel   = 0
-FilterBox.Text              = "Emerald"
-FilterBox.PlaceholderText   = "เช่น: Emerald, medkit, ammo ..."
-FilterBox.TextColor3        = Color3.fromRGB(255, 255, 255)
-FilterBox.PlaceholderColor3 = Color3.fromRGB(100, 100, 115)
-FilterBox.TextSize          = 13
-FilterBox.Font              = Enum.Font.Gotham
-FilterBox.ClearTextOnFocus  = false
-FilterBox.Parent            = Frame
-makeCorner(FilterBox, 7)
+local SBoxTitle = Instance.new("TextLabel")
+SBoxTitle.Size             = UDim2.new(1,0,0,18)
+SBoxTitle.Position         = UDim2.new(0,10,0,4)
+SBoxTitle.BackgroundTransparency = 1
+SBoxTitle.Text             = "สถานะ"
+SBoxTitle.TextColor3       = Color3.fromRGB(100,100,115)
+SBoxTitle.Font             = Enum.Font.Gotham
+SBoxTitle.TextSize         = 10
+SBoxTitle.TextXAlignment   = Enum.TextXAlignment.Left
+SBoxTitle.Parent           = SBox
 
-FilterBox:GetPropertyChangedSignal("Text"):Connect(function()
-    Config.ItemFilter = FilterBox.Text
-end)
+local STxt = Instance.new("TextLabel")
+STxt.Size                  = UDim2.new(1,-20,0,24)
+STxt.Position              = UDim2.new(0,10,0,22)
+STxt.BackgroundTransparency = 1
+STxt.Text                  = S.IDLE.text
+STxt.TextColor3            = S.IDLE.color
+STxt.Font                  = Enum.Font.GothamBold
+STxt.TextSize              = 14
+STxt.TextXAlignment        = Enum.TextXAlignment.Left
+STxt.TextWrapped           = true
+STxt.Parent                = SBox
+StatusText = STxt
 
--- ── Delay Input ──
-makeLabel(Frame, "Teleport Delay (วินาที, ต่ำสุด 0.05)",
-    UDim2.new(0, 10, 0, 104), UDim2.new(1, -20, 0, 16), 11)
+-- รอบนับ
+local CntLbl = Instance.new("TextLabel")
+CntLbl.Size                = UDim2.new(1,-20,0,14)
+CntLbl.Position            = UDim2.new(0,10,0,112)
+CntLbl.BackgroundTransparency = 1
+CntLbl.Text                = "ทำไปแล้ว: 0 รอบ"
+CntLbl.TextColor3          = Color3.fromRGB(150,150,170)
+CntLbl.Font                = Enum.Font.Gotham
+CntLbl.TextSize            = 11
+CntLbl.TextXAlignment      = Enum.TextXAlignment.Left
+CntLbl.Parent              = Frame
+CountLabel = CntLbl
 
-local DelayBox = Instance.new("TextBox")
-DelayBox.Size              = UDim2.new(1, -20, 0, 30)
-DelayBox.Position          = UDim2.new(0, 10, 0, 122)
-DelayBox.BackgroundColor3  = Color3.fromRGB(28, 28, 40)
-DelayBox.BorderSizePixel   = 0
-DelayBox.Text              = tostring(Config.TeleportDelay)
-DelayBox.TextColor3        = Color3.fromRGB(255, 255, 255)
-DelayBox.TextSize          = 13
-DelayBox.Font              = Enum.Font.Gotham
-DelayBox.ClearTextOnFocus  = false
-DelayBox.Parent            = Frame
-makeCorner(DelayBox, 7)
+-- ── Input helper ──
+local function makeInput(parent, label, placeholder, default, yPos, onChange)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size               = UDim2.new(1,-20,0,14)
+    lbl.Position           = UDim2.new(0,10,0,yPos)
+    lbl.BackgroundTransparency = 1
+    lbl.Text               = label
+    lbl.TextColor3         = Color3.fromRGB(160,160,175)
+    lbl.Font               = Enum.Font.Gotham
+    lbl.TextSize           = 11
+    lbl.TextXAlignment     = Enum.TextXAlignment.Left
+    lbl.Parent             = parent
 
-DelayBox.FocusLost:Connect(function()
-    local v = tonumber(DelayBox.Text)
-    if v and v >= 0.05 then
-        Config.TeleportDelay = v
-    else
-        DelayBox.Text = tostring(Config.TeleportDelay)
-    end
-end)
+    local box = Instance.new("TextBox")
+    box.Size               = UDim2.new(1,-20,0,30)
+    box.Position           = UDim2.new(0,10,0,yPos+16)
+    box.BackgroundColor3   = Color3.fromRGB(24,24,36)
+    box.BorderSizePixel    = 0
+    box.Text               = default
+    box.PlaceholderText    = placeholder
+    box.TextColor3         = Color3.new(1,1,1)
+    box.PlaceholderColor3  = Color3.fromRGB(90,90,110)
+    box.Font               = Enum.Font.Gotham
+    box.TextSize           = 13
+    box.ClearTextOnFocus   = false
+    box.Parent             = parent
+    corner(box, 7)
 
--- ── Status Label ──
-local StatusLbl = makeLabel(Frame, "สถานะ: หยุดทำงาน",
-    UDim2.new(0, 10, 0, 162), UDim2.new(1, -20, 0, 16), 11,
-    Color3.fromRGB(180, 180, 190), Enum.TextXAlignment.Center)
+    box:GetPropertyChangedSignal("Text"):Connect(function()
+        onChange(box.Text)
+    end)
+    return box
+end
+
+makeInput(Frame, "ชื่อ Fuel ในเกม", "เช่น: Fuel, Jerry Can ...", Config.FuelName, 132,
+    function(v) Config.FuelName = v end)
+
+makeInput(Frame, "ชื่อเครื่องปั่นไฟ", "เช่น: Generator, PowerGen ...", Config.GeneratorName, 188,
+    function(v) Config.GeneratorName = v end)
+
+makeInput(Frame, "Delay (วินาที, ต่ำสุด 0.1)", "0.35", tostring(Config.TeleportDelay), 244,
+    function(v)
+        local n = tonumber(v)
+        if n and n >= 0.1 then Config.TeleportDelay = n end
+    end)
 
 -- ── Toggle Button ──
-local ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Size             = UDim2.new(1, -20, 0, 40)
-ToggleBtn.Position         = UDim2.new(0, 10, 0, 182)
-ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 170, 80)
-ToggleBtn.BorderSizePixel  = 0
-ToggleBtn.Text             = "START AUTO FARM"
-ToggleBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
-ToggleBtn.TextSize         = 15
-ToggleBtn.Font             = Enum.Font.GothamBold
-ToggleBtn.Parent           = Frame
-makeCorner(ToggleBtn, 10)
+local Btn = Instance.new("TextButton")
+Btn.Size               = UDim2.new(1,-20,0,42)
+Btn.Position           = UDim2.new(0,10,0,310)
+Btn.BackgroundColor3   = Color3.fromRGB(35,160,75)
+Btn.BorderSizePixel    = 0
+Btn.Text               = "START"
+Btn.TextColor3         = Color3.new(1,1,1)
+Btn.Font               = Enum.Font.GothamBold
+Btn.TextSize           = 16
+Btn.Parent             = Frame
+corner(Btn, 10)
 
--- Hover effect
-ToggleBtn.MouseEnter:Connect(function()
-    TweenService:Create(ToggleBtn, TweenInfo.new(0.15), {
-        BackgroundTransparency = 0.2
-    }):Play()
+Btn.MouseEnter:Connect(function()
+    TweenService:Create(Btn,TweenInfo.new(0.15),{BackgroundTransparency=0.2}):Play()
 end)
-ToggleBtn.MouseLeave:Connect(function()
-    TweenService:Create(ToggleBtn, TweenInfo.new(0.15), {
-        BackgroundTransparency = 0
-    }):Play()
+Btn.MouseLeave:Connect(function()
+    TweenService:Create(Btn,TweenInfo.new(0.15),{BackgroundTransparency=0}):Play()
 end)
 
--- Toggle logic
-ToggleBtn.MouseButton1Click:Connect(function()
-    Config.Enabled = not Config.Enabled
-
+Btn.MouseButton1Click:Connect(function()
     if Config.Enabled then
-        ToggleBtn.Text             = "STOP AUTO FARM"
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-        StatusLbl.Text             = "สถานะ: กำลังทำงาน..."
-        StatusLbl.TextColor3       = Color3.fromRGB(80, 220, 100)
+        stopFarm()
+        Btn.Text             = "START"
+        Btn.BackgroundColor3 = Color3.fromRGB(35,160,75)
     else
-        ToggleBtn.Text             = "START AUTO FARM"
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 170, 80)
-        StatusLbl.Text             = "สถานะ: หยุดทำงาน"
-        StatusLbl.TextColor3       = Color3.fromRGB(180, 180, 190)
+        startFarm()
+        Btn.Text             = "STOP"
+        Btn.BackgroundColor3 = Color3.fromRGB(190,45,45)
     end
 end)
 
 -- ── Footer ──
-makeLabel(Frame, "ลาก GUI ได้  |  by Roblox Pro",
-    UDim2.new(0, 0, 1, -20), UDim2.new(1, 0, 0, 18), 10,
-    Color3.fromRGB(80, 80, 100), Enum.TextXAlignment.Center)
+local Foot = Instance.new("TextLabel")
+Foot.Size              = UDim2.new(1,0,0,16)
+Foot.Position          = UDim2.new(0,0,1,-18)
+Foot.BackgroundTransparency = 1
+Foot.Text              = "ลาก GUI ได้  |  Roblox Pro"
+Foot.TextColor3        = Color3.fromRGB(65,65,80)
+Foot.Font              = Enum.Font.Gotham
+Foot.TextSize          = 10
+Foot.TextXAlignment    = Enum.TextXAlignment.Center
+Foot.Parent            = Frame
 
--- ── อัปเดต status ทุก 0.5 วิ แสดง item ที่เจอ ──
-task.spawn(function()
-    while task.wait(0.5) do
-        if Config.Enabled then
-            local _, hrp = getCharParts()
-            if hrp then
-                local item, dist = findNearestItem(hrp.Position)
-                if item then
-                    StatusLbl.Text = ("กำลังเก็บ: %s  (%.0f studs)"):format(item.Name, dist)
-                else
-                    StatusLbl.Text = "กำลังหา item... (ไม่พบในรัศมี)"
-                end
-            end
-        end
-    end
-end)
-
-print("[AutoFarm] โหลดสำเร็จ! กดปุ่ม START AUTO FARM เพื่อเริ่มเก็บของ")
+print("[FuelFarm] โหลดสำเร็จ! กด START เพื่อเริ่ม")
