@@ -1,11 +1,13 @@
 -- ══════════════════════════════════════════════════════════════
 --   Auto Fuel Farm | Survive the Apocalypse
---   Flow: วาปหา Fuel → กด 1 → กด F เก็บ → วาปไป Generator → กด 1 → กด F ใส่
+--   Flow: กด 1 ถือกระเป๋า → วาปหา Fuel → ชี้เมาส์ที่ Fuel → กด F
+--         → วาปไป Generator → ชี้เมาส์ที่ Generator → กด F ใส่
 -- ══════════════════════════════════════════════════════════════
 
 local Players      = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local VIM          = game:GetService("VirtualInputManager")
+local Camera       = workspace.CurrentCamera
 
 local LocalPlayer  = Players.LocalPlayer
 
@@ -14,25 +16,27 @@ local Config = {
     Enabled       = false,
     FuelName      = "Fuel",
     GeneratorName = "Generator",
-    TeleportDelay = 0.3,   -- หน่วงหลัง teleport
-    KeyDelay      = 0.3,   -- หน่วงระหว่างกดปุ่ม
-    MaxFuelPerRun = 5,     -- เก็บ fuel สูงสุดกี่อันต่อรอบ
-    WaitAtGen     = 3,     -- รอที่ Generator กี่วิก่อนวนรอบใหม่
+    TeleportDelay = 0.35,  -- หน่วงหลัง teleport
+    AimDelay      = 0.25,  -- หน่วงหลังชี้เมาส์
+    KeyDelay      = 0.3,   -- หน่วงหลังกดปุ่ม
+    MaxFuelPerRun = 5,     -- เก็บสูงสุดกี่อันต่อรอบ
+    WaitAtGen     = 3,     -- รอที่ Generator ก่อนวนรอบใหม่
 }
 
 -- ─── States ───────────────────────────────────────────────────
 local S = {
-    IDLE     = { text = "รอเริ่มต้น",               color = Color3.fromRGB(120,120,135) },
-    GO_FUEL  = { text = "วาปไปหา Fuel",              color = Color3.fromRGB(80,180,255)  },
-    PRESS1   = { text = "กดเลข 1 (กระเป๋า)",         color = Color3.fromRGB(230,160,40)  },
-    PRESSF   = { text = "กด F เก็บ Fuel",            color = Color3.fromRGB(80,220,120)  },
-    GO_GEN   = { text = "วาปไปเครื่องปั่นไฟ",        color = Color3.fromRGB(180,100,255) },
-    INSERT1  = { text = "กดเลข 1 ที่ Generator",     color = Color3.fromRGB(230,160,40)  },
-    INSERTF  = { text = "กด F ใส่ Fuel",             color = Color3.fromRGB(255,120,60)  },
-    DONE     = { text = "ใส่ Fuel เสร็จ รอรอบถัดไป", color = Color3.fromRGB(80,220,120)  },
-    NO_FUEL  = { text = "ไม่พบ Fuel ในแมป รอ...",    color = Color3.fromRGB(220,80,80)   },
-    NO_GEN   = { text = "ไม่พบเครื่องปั่นไฟ",        color = Color3.fromRGB(220,80,80)   },
-    DEAD     = { text = "ตาย รอ respawn...",          color = Color3.fromRGB(180,50,50)   },
+    IDLE     = { text = "รอเริ่มต้น",                   color = Color3.fromRGB(120,120,135) },
+    EQUIP    = { text = "กด 1 ถือกระเป๋า",              color = Color3.fromRGB(230,160,40)  },
+    GO_FUEL  = { text = "วาปไปหา Fuel",                  color = Color3.fromRGB(80,180,255)  },
+    AIM_FUEL = { text = "ชี้เมาส์ที่ Fuel...",           color = Color3.fromRGB(255,220,60)  },
+    PRESSF   = { text = "กด F เก็บ Fuel",               color = Color3.fromRGB(80,220,120)  },
+    GO_GEN   = { text = "วาปไปเครื่องปั่นไฟ",           color = Color3.fromRGB(180,100,255) },
+    AIM_GEN  = { text = "ชี้เมาส์ที่เครื่องปั่นไฟ...",  color = Color3.fromRGB(255,220,60)  },
+    INSERTF  = { text = "กด F ใส่ Fuel",                color = Color3.fromRGB(255,120,60)  },
+    DONE     = { text = "ใส่ Fuel เสร็จ รอรอบถัดไป",   color = Color3.fromRGB(80,220,120)  },
+    NO_FUEL  = { text = "ไม่พบ Fuel ในแมป รอ...",       color = Color3.fromRGB(220,80,80)   },
+    NO_GEN   = { text = "ไม่พบเครื่องปั่นไฟ",           color = Color3.fromRGB(220,80,80)   },
+    DEAD     = { text = "ตาย รอ respawn...",             color = Color3.fromRGB(180,50,50)   },
 }
 
 local StatusText, StatusBox, InfoLabel, CountLabel
@@ -69,7 +73,8 @@ local function getPos(obj)
 end
 
 local function teleportTo(hrp, pos)
-    hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    -- วาปมาอยู่ข้างๆ แทนที่จะอยู่เหนือ เพื่อให้เมาส์ชี้ได้ง่ายขึ้น
+    hrp.CFrame = CFrame.new(pos + Vector3.new(2, 1, 0))
 end
 
 local function pressKey(key)
@@ -78,11 +83,23 @@ local function pressKey(key)
     VIM:SendKeyEvent(false, key, false, game)
 end
 
-local function press1ThenF()
-    pressKey(Enum.KeyCode.One)
-    task.wait(Config.KeyDelay)
-    pressKey(Enum.KeyCode.F)
-    task.wait(Config.KeyDelay)
+-- ─── ชี้เมาส์ไปที่ตำแหน่ง 3D ────────────────────────────────
+local function aimMouseAt(worldPos)
+    -- แปลง world position → screen position
+    local screenPos, onScreen = Camera:WorldToScreenPoint(worldPos)
+
+    if onScreen then
+        VIM:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+    else
+        -- ถ้าอยู่นอกจอ ให้ชี้กลางจอก่อน แล้วค่อย aim ใหม่
+        local vp = Camera.ViewportSize
+        VIM:SendMouseMoveEvent(vp.X / 2, vp.Y / 2, game)
+        task.wait(0.1)
+        local sp2, _ = Camera:WorldToScreenPoint(worldPos)
+        VIM:SendMouseMoveEvent(sp2.X, sp2.Y, game)
+    end
+
+    task.wait(Config.AimDelay)
 end
 
 -- ─── หา Fuel / Generator ──────────────────────────────────────
@@ -147,17 +164,21 @@ local function startFarm()
                 continue
             end
 
-            -- ── หา Fuel ทั้งหมด ──────────────────────────────
+            -- ── กด 1 ถือกระเป๋าก่อน ──────────────────────────
+            setState(S.EQUIP)
+            pressKey(Enum.KeyCode.One)
+            task.wait(Config.KeyDelay)
+
+            -- ── หา Fuel ───────────────────────────────────────
             local fuels = findAllFuels()
             if #fuels == 0 then
                 setState(S.NO_FUEL)
                 task.wait(3)
                 continue
             end
-
             fuels = sortByDist(fuels, hrp.Position)
 
-            -- ── วาปเก็บทีละอัน: กด 1 → กด F ──────────────────
+            -- ── วาปหา Fuel ทีละอัน ────────────────────────────
             local collected = 0
             for _, fuel in ipairs(fuels) do
                 if not Config.Enabled then break end
@@ -169,21 +190,19 @@ local function startFarm()
                 local fpos = getPos(fuel)
                 if not fpos then continue end
 
-                -- วาปไป Fuel
+                -- 1. วาปไปข้างๆ Fuel
                 setState(S.GO_FUEL)
                 if InfoLabel then
-                    InfoLabel.Text = ("เก็บ %d/%d  |  %s"):format(
-                        collected, Config.MaxFuelPerRun, fuel.Name)
+                    InfoLabel.Text = ("เก็บ %d/%d"):format(collected, Config.MaxFuelPerRun)
                 end
                 teleportTo(hrpN, fpos)
                 task.wait(Config.TeleportDelay)
 
-                -- กด 1
-                setState(S.PRESS1)
-                pressKey(Enum.KeyCode.One)
-                task.wait(Config.KeyDelay)
+                -- 2. ชี้เมาส์ไปที่ Fuel
+                setState(S.AIM_FUEL)
+                aimMouseAt(fpos)
 
-                -- กด F
+                -- 3. กด F เก็บ
                 setState(S.PRESSF)
                 pressKey(Enum.KeyCode.F)
                 task.wait(Config.KeyDelay)
@@ -202,7 +221,6 @@ local function startFarm()
                 task.wait(1) continue
             end
 
-            setState(S.GO_GEN)
             local gen = findGenerator(hrp2.Position)
             if not gen then
                 setState(S.NO_GEN)
@@ -211,17 +229,17 @@ local function startFarm()
             end
 
             local gpos = getPos(gen)
-            if gpos then
-                teleportTo(hrp2, gpos)
-                task.wait(Config.TeleportDelay)
-            end
+            if not gpos then task.wait(1) continue end
 
-            -- ── กด 1 ที่ Generator ────────────────────────────
-            setState(S.INSERT1)
-            pressKey(Enum.KeyCode.One)
-            task.wait(Config.KeyDelay)
+            setState(S.GO_GEN)
+            teleportTo(hrp2, gpos)
+            task.wait(Config.TeleportDelay)
 
-            -- ── กด F ใส่ Fuel ─────────────────────────────────
+            -- ชี้เมาส์ที่ Generator
+            setState(S.AIM_GEN)
+            aimMouseAt(gpos)
+
+            -- กด F ใส่ Fuel
             setState(S.INSERTF)
             pressKey(Enum.KeyCode.F)
             task.wait(Config.KeyDelay)
@@ -253,8 +271,8 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
 local Frame = Instance.new("Frame")
-Frame.Size             = UDim2.new(0, 310, 0, 390)
-Frame.Position         = UDim2.new(0, 16, 0.5, -195)
+Frame.Size             = UDim2.new(0, 310, 0, 400)
+Frame.Position         = UDim2.new(0, 16, 0.5, -200)
 Frame.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
 Frame.BorderSizePixel  = 0
 Frame.Active           = true
@@ -302,7 +320,7 @@ local SubLbl = Instance.new("TextLabel")
 SubLbl.Size = UDim2.new(1,-12,0,13)
 SubLbl.Position = UDim2.new(0,12,0,26)
 SubLbl.BackgroundTransparency = 1
-SubLbl.Text = "Survive the Apocalypse  |  [1] + [F] = เก็บ/ใส่"
+SubLbl.Text = "กด 1 → วาป → ชี้เมาส์ → กด F"
 SubLbl.TextColor3 = Color3.fromRGB(170,195,255)
 SubLbl.Font = Enum.Font.Gotham
 SubLbl.TextSize = 10
@@ -343,7 +361,6 @@ STxt.TextWrapped = true
 STxt.Parent = SBox
 StatusText = STxt
 
--- Info label
 local ILbl = Instance.new("TextLabel")
 ILbl.Size = UDim2.new(1,-20,0,16)
 ILbl.Position = UDim2.new(0,10,0,120)
@@ -368,7 +385,6 @@ CLbl.TextXAlignment = Enum.TextXAlignment.Left
 CLbl.Parent = Frame
 CountLabel = CLbl
 
--- Input helper
 local function makeInput(labelTxt, placeholder, default, yPos, onChange)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1,-20,0,14)
@@ -410,10 +426,9 @@ makeInput("เก็บ Fuel สูงสุดกี่อันต่อรอ
 makeInput("Delay ระหว่างปุ่ม (วินาที)", "0.3", tostring(Config.KeyDelay), 306,
     function(v) local n=tonumber(v) if n and n>=0.1 then Config.KeyDelay=n end end)
 
--- Toggle Button
 local Btn = Instance.new("TextButton")
 Btn.Size = UDim2.new(1,-20,0,40)
-Btn.Position = UDim2.new(0,10,0,348)
+Btn.Position = UDim2.new(0,10,0,352)
 Btn.BackgroundColor3 = Color3.fromRGB(35,160,75)
 Btn.BorderSizePixel = 0
 Btn.Text = "START"
